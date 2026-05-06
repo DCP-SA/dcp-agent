@@ -879,7 +879,7 @@ def is_windows() -> bool:
 # =============================================================================
 
 _SERVICE_BASE = "hermes-gateway"
-SERVICE_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
+SERVICE_DESCRIPTION = "DCP Agent Gateway - Provider Autonomous Management"
 
 
 def _profile_suffix() -> str:

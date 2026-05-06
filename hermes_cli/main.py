@@ -1674,14 +1674,14 @@ def cmd_whatsapp(args):
             print("    2. Send a message to the bot's WhatsApp number")
             print("    3. The agent will reply automatically")
             print()
-            print("  Tip: Agent responses are prefixed with '⚕ Hermes Agent'")
+            print("  Tip: Agent responses are prefixed with 'DCP Agent'")
         else:
             print("  Next steps:")
             print("    1. Start the gateway:  hermes gateway")
             print("    2. Open WhatsApp → Message Yourself")
             print("    3. Type a message — the agent will reply")
             print()
-            print("  Tip: Agent responses are prefixed with '⚕ Hermes Agent'")
+            print("  Tip: Agent responses are prefixed with 'DCP Agent'")
             print("  so you can tell them apart from your own messages.")
         print()
         print("  Or install as a service: hermes gateway install")
@@ -5338,7 +5338,7 @@ def cmd_import(args):
 
 def cmd_version(args):
     """Show version."""
-    print(f"Hermes Agent v{__version__} ({__release_date__})")
+    print(f"DCP Agent v{__version__} ({__release_date__})")
     print(f"Project: {PROJECT_ROOT}")
 
     # Show Python version
@@ -6993,7 +6993,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
     )
     assume_yes = bool(getattr(args, "yes", False))
 
-    print("⚕ Updating Hermes Agent...")
+    print("Updating DCP Agent...")
     print()
 
     # Pre-update backup — runs before any git/file mutation so users can

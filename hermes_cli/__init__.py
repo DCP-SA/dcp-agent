@@ -1,5 +1,6 @@
 """
-Hermes CLI - Unified command-line interface for Hermes Agent.
+DCP Agent CLI - Autonomous provider agent for the DCP network.
+Built on Hermes (Nous Research), rebranded for DCP (dcp.sa).
 
 Provides subcommands for:
 - hermes chat          - Interactive chat (same as ./hermes)
