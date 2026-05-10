@@ -3099,9 +3099,94 @@ def _guard_official_docker_root_gateway() -> None:
     sys.exit(1)
 
 
+def _run_dcp_first_run_orchestration_if_needed() -> None:
+    """If this is the first launch on a freshly-installed DCP provider box,
+    drive the agent through the boot skills before starting the gateway.
+
+    Trigger: ``~/.dcp/install_token`` exists AND ``~/.dcp/agent-initialized``
+    does not. Both are written by ``agent-install.sh``. This makes the
+    DCP Agent self-orchestrate on first run instead of needing the
+    operator to chat with it before anything works.
+
+    Sequence (executed via the Hermes oneshot path so the agent itself
+    does the work, not the bash installer):
+      1. ``dcp-first-run-setup`` — write /etc/sudoers.d/dcp-agent
+      2. ``dcp-provider-registration`` — POST install_token to
+         api.dcp.sa, get WireGuard config, bring up the tunnel
+      3. ``dcp-model-auto-select`` — pick the highest-quality model
+         that fits this hardware from the catalog and pull via Ollama
+      4. ``dcp-boot-sequence`` — run the full startup checklist
+
+    On success the marker ``~/.dcp/agent-initialized`` is written so
+    subsequent gateway restarts skip this block and go straight to the
+    always-on loop. Failures are non-fatal — the always-on loop will
+    still start, and the agent's self-heal skill will retry registration.
+    """
+    home = os.path.expanduser("~")
+    dcp_dir = os.path.join(home, ".dcp")
+    token_file = os.path.join(dcp_dir, "install_token")
+    init_marker = os.path.join(dcp_dir, "agent-initialized")
+
+    if not os.path.exists(token_file):
+        return  # not a fresh DCP install
+    if os.path.exists(init_marker):
+        return  # already orchestrated on a prior boot
+
+    print("┌─────────────────────────────────────────────────────────┐")
+    print("│  DCP first-run orchestration starting…                  │")
+    print("│  Agent will: set up sudo → register provider →          │")
+    print("│              pick + pull model → enter always-on        │")
+    print("└─────────────────────────────────────────────────────────┘")
+
+    try:
+        from hermes_cli.oneshot import run_oneshot  # local import to avoid cycle
+    except Exception as exc:
+        print(f"[dcp-first-run] could not import oneshot: {exc}")
+        return
+
+    prompt = (
+        "You are doing first-run setup for a brand-new DCP provider machine. "
+        "Run these skills end-to-end, in order, without asking the user "
+        "anything (the operator wants you to take over):\n"
+        "1. `dcp-first-run-setup` — set up passwordless sudo for the WireGuard "
+        "and GPU commands you need.\n"
+        f"2. `dcp-provider-registration` — read the install token at "
+        f"{token_file}, the env snapshot at ~/.dcp/install_env.json, "
+        "register this machine with api.dcp.sa, fetch the WireGuard peer "
+        "config, bring up the tunnel.\n"
+        "3. `dcp-model-auto-select` — read ~/.dcp/llmfit_recommendations.json "
+        "if present (and ~/.dcp/install_env.json regardless), pick the highest-"
+        "quality model from the DCP catalog that fits this GPU, and pull it "
+        "via Ollama. Skip if the right model is already pulled.\n"
+        "4. `dcp-boot-sequence` — run the full startup checklist (GPU, WG, "
+        "Ollama, heartbeat) and confirm the machine is ready to take jobs.\n\n"
+        "When all four are done, touch ~/.dcp/agent-initialized and report a "
+        "concise one-line summary. If any step fails, report which one and "
+        "why — do NOT touch the marker. The always-on gateway will start "
+        "after you finish."
+    )
+
+    try:
+        rc = run_oneshot(prompt)
+        if rc == 0 and not os.path.exists(init_marker):
+            # Defensive: agent should have touched it, but if it didn't we
+            # still mark success based on exit code so we don't loop forever.
+            try:
+                os.makedirs(dcp_dir, exist_ok=True)
+                with open(init_marker, "w") as f:
+                    f.write("orchestrated_by=run_gateway\n")
+            except Exception:
+                pass
+        elif rc != 0:
+            print(f"[dcp-first-run] oneshot returned rc={rc}; gateway will still start. "
+                  f"Self-heal will retry on the next loop.")
+    except Exception as exc:
+        print(f"[dcp-first-run] orchestration failed: {exc}; continuing to gateway start.")
+
+
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """Run the gateway in foreground.
-    
+
     Args:
         verbose: Stderr log verbosity count added on top of default WARNING (0=WARNING, 1=INFO, 2+=DEBUG).
         quiet: Suppress all stderr log output.
@@ -3109,6 +3194,12 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
                  This prevents systemd restart loops when the old process
                  hasn't fully exited yet.
     """
+    # DCP-specific: if this is a fresh provider install, orchestrate
+    # first-run-setup → provider-registration → model-auto-select →
+    # boot-sequence via the agent itself before entering the always-on
+    # gateway loop. No-op on every other deployment.
+    _run_dcp_first_run_orchestration_if_needed()
+
     _guard_official_docker_root_gateway()
     sys.path.insert(0, str(PROJECT_ROOT))
 
