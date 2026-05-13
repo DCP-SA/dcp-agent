@@ -15,7 +15,7 @@ This is a fork of [Nous Research's Hermes Agent](https://github.com/NousResearch
 | Auto-orchestration on first run when `install_token` is present | `hermes_cli/gateway.py` — commit `daf22f53` |
 | Heartbeat executes `pull_model` tasks from backend response | commit `faf4cf9f` |
 | 19 DCP-specific skills + 10 cron scripts + SOUL.md persona | commits `8480a5fe`, `217e83fb` |
-| Installer scripts (`scripts/install.sh`, `scripts/install-agent.sh`) hook into `api.dcp.sa/install/agent` and `https://api.dcp.sa/installers/dcp-agent.tar.gz` | `scripts/` |
+| Installer scripts hook into `api.dcp.sa/install/agent` and `https://api.dcp.sa/installers/dcp-agent.tar.gz` | `scripts/install.sh` |
 | Pull-tasks loop (separate provider work surface) | `feat/agent-pull-tasks-v2` branch — in flight |
 
 If you're touching code that's pure upstream Hermes, prefer to send the change to `NousResearch/hermes-agent` first, then merge upstream here.
@@ -26,7 +26,9 @@ If you're touching code that's pure upstream Hermes, prefer to send the change t
 
 ### 1. Clone
 ```bash
-gh repo clone dhnpmp-tech/dcp-agent
+gh repo clone dhnpmp-tech/dcp-agent   # if you have GitHub CLI
+# OR:
+git clone https://github.com/dhnpmp-tech/dcp-agent.git
 cd dcp-agent
 ```
 
@@ -39,11 +41,10 @@ cd dcp-agent
 
 The installer creates a `uv`-managed Python 3.11 venv at `~/.hermes/hermes-agent/venv` (or `.venv` in the repo root for dev). It installs `hermes`, `hermes-agent`, and `hermes-acp` CLI entries.
 
-**Known gotcha (2026-05-13, Tareq Node 2 incident):** the installer does not currently bundle `fastapi` and `uvicorn`, which are required for the `hermes dashboard` web UI (port 8642). If `hermes dashboard --port 8642` fails with `No module named 'fastapi'`, run:
+**Known gotcha (2026-05-13, Tareq Node 2 incident):** early versions of `install.sh` skipped dashboard extras, so `hermes dashboard --port 8642` failed with `No module named 'fastapi'`. PR #10 fixed this by upgrading the install step from `.[]` to `.[all]` — the `all` extra in `pyproject.toml` already bundles `fastapi` and `uvicorn`. If you're on a pre-#10 clone, re-run the installer. Manual fix if you can't re-run:
 ```bash
-~/.dcp/agent/.venv/bin/pip install fastapi uvicorn
+~/.hermes/hermes-agent/venv/bin/pip install fastapi uvicorn
 ```
-Track upstream: this should land in `pyproject.toml`'s `[project.optional-dependencies] all` or a new `dashboard` extra.
 
 ### 3. Configure for DCP
 The installer writes `~/.hermes/.env`. The DCP-required keys are:
@@ -74,7 +75,8 @@ Open `http://localhost:8642` for the dashboard with embedded chat. Gateway exits
 
 ### 5. Verify
 ```bash
-hermes status                # ✓ on Model, ✓ on at least one API key
+hermes status                # check session info, model, API keys
+hermes gateway status        # check gateway is running (when deployed as a daemon)
 ```
 
 ---
@@ -148,11 +150,11 @@ Long-term we'll automate this with a GitHub Action on tag push; for now it's man
 
 | What | Where |
 |---|---|
-| DCP-specific skills | `hermes_cli/skills/dcp/` (and individual skills throughout `optional-skills/` tagged with `domain:dcp`) |
-| Cron scripts | `scripts/` — `daily-report.sh`, `gpu-check.sh`, `heartbeat.sh`, `disk-cleanup.sh`, `earnings-update.sh`, etc. |
+| DCP-specific skills | `skills/dcp/` (19 skills: heartbeat, gpu-monitor, ollama-manager, wireguard-health, boot-sequence, first-run-setup, provider-registration, provider-chat, model-auto-select, always-on, self-heal, self-update, job-dispatch, cron-orchestrator, earnings, network-diagnostics, power-management, log-manager, security-hardening) |
+| Cron scripts | `scripts/` — `daily-report.sh`, `gpu-check.sh`, `heartbeat.sh`, `disk-cleanup.sh`, `earnings-update.sh`, etc. (DCP-specific scripts; upstream scripts like `run_tests.sh`, `install.sh` are shared) |
 | SOUL.md (persona) | `hermes_cli/default_soul.py` writes the default; provider's working copy lives at `~/.hermes/SOUL.md` |
-| Installer scripts | `scripts/install-agent.sh` (one-line installer hosted at `api.dcp.sa/install/agent`) |
-| Provider gateway hook | `hermes_cli/gateway.py` — first-run orchestration when `install_token` exists |
+| Installer scripts | `scripts/install.sh` (full installer; the one-line bootstrap at `api.dcp.sa/install/agent` curls this and pipes it to bash) |
+| Provider gateway hook | `hermes_cli/gateway.py` — first-run orchestration when `~/.dcp/install_token` exists |
 
 ---
 
@@ -171,9 +173,8 @@ When implementing anything that needs central observability, prefer adding a bac
 ## Getting unstuck
 
 If your install hangs at `sudo mkdir -p /etc/systemd/system/ollama.service.d` for more than a minute:
-- That's the `curl | sudo bash` password prompt issue. sudo is waiting for a TTY that doesn't exist on a pipe.
-- Workaround: run the install with `sudo -v` first (caches sudo creds), then re-run the installer.
-- Permanent fix: open a PR using `sudo -n` (non-interactive) in `scripts/install.sh` and surface a clearer error if sudo isn't cached.
+- Pre-PR #10 (merged 2026-05-13), `install.sh` was missing `sudo -n`, causing hangs when sudo couldn't prompt for a password (as happens when piped via `curl | bash`).
+- **Current `main`** (post-PR #10): the installer does a pre-flight `sudo -n true` check and fails fast with a clear `sudo -v` instruction if creds aren't cached. If it hangs anyway, run `sudo -v` first, then re-run the installer.
 
 If `hermes gateway run` exits immediately with "No messaging platforms enabled":
 - The gateway is a bridge for Telegram/Slack/etc. Without one configured, it exits cleanly.
