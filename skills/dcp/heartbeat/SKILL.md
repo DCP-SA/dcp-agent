@@ -27,6 +27,7 @@ curl -s -X POST https://api.dcp.sa/api/providers/heartbeat \
   -H "Authorization: Bearer $DCP_PROVIDER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
+    "api_key": "\'""\'",
     "status": "online",
     "daemon_version": "agent-1.0.0",
     "gpu_model": "NVIDIA GeForce RTX 3060 Ti",

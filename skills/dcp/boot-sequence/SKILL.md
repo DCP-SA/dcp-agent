@@ -10,6 +10,11 @@ metadata:
 
 # DCP Boot Sequence
 
+> **AUTH NOTE for `/api/providers/heartbeat`:** the backend reads `api_key` from the JSON body, not from `Authorization: Bearer`. The Bearer header is ignored. Always include `"api_key": "$DCP_PROVIDER_KEY"` as the first field of your request body. Examples below may show the Bearer header — it's harmless but the body field is required.
+
+
+
+
 Run this on every agent startup. Do NOT report "online" until every check passes.
 
 ## Pre-flight checklist
