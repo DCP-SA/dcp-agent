@@ -25,6 +25,38 @@ fi
 echo "=== DCP Agent Installer ==="
 echo "Provider key: ${PROVIDER_KEY:0:20}..."
 
+# 0. Pre-flight: verify sudo credentials are cached.
+#
+# This installer writes /etc/sudoers.d/dcp-agent (and may apt-get install
+# python3) which requires root.  When invoked via `curl ... | sudo bash`
+# or `curl ... | bash` over a pipe, stdin is the pipe, so sudo cannot
+# prompt for a password and hangs forever.  Tareq Node 2 hung 3h30m on
+# this path before manual intervention.
+#
+# Fail fast with a clear instruction instead of hanging.  We require
+# `sudo -n true` to succeed (creds already cached) so every later sudo
+# call can safely use `sudo -n` and propagate failures.
+if ! command -v sudo &>/dev/null; then
+  echo "ERROR: sudo not found on PATH."
+  echo "       This installer needs root to write /etc/sudoers.d/dcp-agent."
+  echo "       Install sudo, or run this script as root directly."
+  exit 1
+fi
+
+if ! sudo -n true 2>/dev/null; then
+  echo "ERROR: sudo credentials are not cached."
+  echo ""
+  echo "When this installer is piped to bash (curl ... | bash) sudo cannot"
+  echo "prompt for a password and the install hangs silently."
+  echo ""
+  echo "Fix: cache your sudo credentials first, then re-run the installer:"
+  echo ""
+  echo "    sudo -v"
+  echo "    curl -fsSL https://api.dcp.sa/install/agent | bash -s -- --key $PROVIDER_KEY"
+  echo ""
+  exit 1
+fi
+
 # 1. Create DCP directory
 mkdir -p "$DCP_DIR"
 
@@ -34,7 +66,7 @@ if ! command -v python3 &>/dev/null; then
   if [[ "$(uname)" == "Darwin" ]]; then
     brew install python@3.11
   else
-    sudo apt-get update && sudo apt-get install -y python3.11 python3.11-venv
+    sudo -n apt-get update && sudo -n apt-get install -y python3.11 python3.11-venv
   fi
 fi
 
@@ -62,7 +94,10 @@ cd "$AGENT_DIR"
 echo "Setting up environment..."
 uv venv .venv --python 3.11 2>/dev/null || python3 -m venv .venv
 source .venv/bin/activate
-uv pip install -e . 2>/dev/null || pip install -e .
+# Install with [web] extra so `hermes dashboard --tui` has fastapi + uvicorn.
+# Without this, the dashboard fails with ModuleNotFoundError: No module
+# named 'fastapi' (surfaced on Tareq Node 2).
+uv pip install -e '.[web]' 2>/dev/null || pip install -e '.[web]'
 
 # 6. Write config
 echo "Configuring..."
@@ -105,23 +140,23 @@ if [ ! -f "$DCP_DIR/agent-initialized" ]; then
   if [[ "$(uname)" == "Darwin" ]]; then
     # macOS
     WG_PATHS="/usr/bin/wg, /usr/bin/wg-quick, /usr/local/bin/wg, /usr/local/bin/wg-quick, /opt/homebrew/bin/wg, /opt/homebrew/bin/wg-quick"
-    sudo tee /etc/sudoers.d/dcp-agent > /dev/null << SUDOERS
+    sudo -n tee /etc/sudoers.d/dcp-agent > /dev/null << SUDOERS
 $CURRENT_USER ALL=(ALL) NOPASSWD: $WG_PATHS
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/sbin/powermetrics
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/sbin/networksetup
 $CURRENT_USER ALL=(ALL) NOPASSWD: /sbin/ifconfig
 SUDOERS
-    sudo chmod 440 /etc/sudoers.d/dcp-agent
+    sudo -n chmod 440 /etc/sudoers.d/dcp-agent
   else
     # Linux
-    sudo tee /etc/sudoers.d/dcp-agent > /dev/null << SUDOERS
+    sudo -n tee /etc/sudoers.d/dcp-agent > /dev/null << SUDOERS
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/wg-quick
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/nvidia-smi
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart ollama
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wg-quick@wg0
 $CURRENT_USER ALL=(ALL) NOPASSWD: /sbin/ip
 SUDOERS
-    sudo chmod 440 /etc/sudoers.d/dcp-agent
+    sudo -n chmod 440 /etc/sudoers.d/dcp-agent
   fi
 
   touch "$DCP_DIR/agent-initialized"
