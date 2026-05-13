@@ -1007,6 +1007,31 @@ Delete the contents (or this file) to use the default personality.
             }
         }
     }
+
+    # Belt-and-suspenders: verify all 19 DCP skills landed. Force a
+    # recursive copy if any are missing (matches Unix install.sh logic).
+    $dcpSrc = "$InstallDir\skills\dcp"
+    $dcpDst = "$HermesHome\skills\dcp"
+    if (Test-Path $dcpSrc) {
+        $required = @(
+            "always-on","boot-sequence","cron-orchestrator","earnings",
+            "first-run-setup","gpu-monitor","heartbeat","job-dispatch",
+            "log-manager","model-auto-select","network-diagnostics",
+            "ollama-manager","power-management","provider-chat",
+            "provider-registration","security-hardening","self-heal",
+            "self-update","wireguard-health"
+        )
+        $missing = $false
+        foreach ($s in $required) {
+            if (-not (Test-Path "$dcpDst\$s\SKILL.md")) { $missing = $true; break }
+        }
+        if ($missing) {
+            Write-Warn "Some DCP skills missing -- forcing recursive copy."
+            New-Item -ItemType Directory -Path $dcpDst -Force | Out-Null
+            Copy-Item -Path "$dcpSrc\*" -Destination $dcpDst -Recurse -Force
+        }
+        Write-Success "DCP skills (19) verified at $dcpDst"
+    }
 }
 
 function Install-NodeDeps {
@@ -1451,11 +1476,29 @@ function Main {
     Install-NodeDeps
     Set-PathVariable
     Copy-ConfigTemplates
+    Install-DcpProviderStackWrapper
     Invoke-SetupWizard
     Install-PlatformSdks
     Start-GatewayIfConfigured
 
     Write-Completion
+}
+
+function Install-DcpProviderStackWrapper {
+    # Idempotent DCP provisioning: scheduled tasks + daemon + liveness.
+    # Mirrors install_dcp_provider_stack() in scripts/install.sh.
+    $helper = Join-Path $InstallDir "scripts\install-cross-platform.ps1"
+    if (-not (Test-Path $helper)) {
+        Write-Warn "install-cross-platform.ps1 not found at $helper -- skipping DCP stack."
+        return
+    }
+    $dcpDir = Join-Path $env:USERPROFILE ".dcp"
+    try {
+        . $helper
+        Install-DcpProviderStack -DcpDir $dcpDir -HermesHome $HermesHome -InstallDir $InstallDir
+    } catch {
+        Write-Warn "DCP provider stack provisioning failed: $_"
+    }
 }
 
 # Wrap in try/catch so errors don't kill the terminal when run via:

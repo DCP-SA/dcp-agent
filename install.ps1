@@ -86,6 +86,28 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "DCP Agent" -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Write-Host "Installed as Windows scheduled task (auto-starts on login)"
 
+# 10b. Provision DCP provider stack (skills + scheduled tasks + daemon + liveness).
+# Mirrors install.sh on Unix; gives curl|iex users the same final state as
+# the heavyweight installer.
+$HermesHome = "$env:USERPROFILE\.hermes"
+if (Test-Path "$AGENT_DIR\skills\dcp") {
+    $dcpDst = "$HermesHome\skills\dcp"
+    New-Item -ItemType Directory -Path $dcpDst -Force | Out-Null
+    Copy-Item -Path "$AGENT_DIR\skills\dcp\*" -Destination $dcpDst -Recurse -Force
+    Write-Host "DCP skills (19) synced to $dcpDst"
+}
+$helper = "$AGENT_DIR\scripts\install-cross-platform.ps1"
+if (Test-Path $helper) {
+    try {
+        . $helper
+        Install-DcpProviderStack -DcpDir $DCP_DIR -HermesHome $HermesHome -InstallDir $AGENT_DIR
+    } catch {
+        Write-Host "WARN: provider stack provisioning hit errors: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "WARN: install-cross-platform.ps1 missing; tasks + liveness not installed." -ForegroundColor Yellow
+}
+
 # 11. Mark initialized
 New-Item -ItemType File -Path "$DCP_DIR\agent-initialized" -Force | Out-Null
 

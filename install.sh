@@ -107,38 +107,8 @@ cat > "$AGENT_DIR/.env" << EOF
 MINIMAX_API_KEY=$MINIMAX_KEY
 TELEGRAM_BOT_TOKEN=8397318012:AAEVIyEYiAM8rckObwHGjJKut6Q9nZv25f4
 DCP_API_URL=https://api.dcp.sa
-DCP_API_BASE=https://api.dcp.sa
 DCP_PROVIDER_KEY=$PROVIDER_KEY
 EOF
-
-# Mirror DCP_* into ~/.hermes/.env — the contract documented in
-# docs/hermes-liveness-spec.md is that the liveness beacon reads from there.
-# We append-or-replace; don't clobber other Hermes config the user may have.
-HERMES_ENV_FILE="$HOME/.hermes/.env"
-touch "$HERMES_ENV_FILE"
-chmod 600 "$HERMES_ENV_FILE"
-python3 - <<PY
-import os, re
-path = os.path.expanduser("~/.hermes/.env")
-try:
-    with open(path) as f:
-        lines = f.read().splitlines()
-except FileNotFoundError:
-    lines = []
-def _set(name, value):
-    global lines
-    pat = re.compile(rf"^{re.escape(name)}=")
-    lines = [l for l in lines if not pat.match(l)]
-    lines.append(f"{name}={value}")
-_set("DCP_API_BASE", "https://api.dcp.sa")
-_set("DCP_PROVIDER_KEY", "$PROVIDER_KEY")
-# DCP_PROVIDER_ID is filled in by the registration step — leave a placeholder
-# so the beacon can detect the empty case and skip.
-if not any(l.startswith("DCP_PROVIDER_ID=") for l in lines):
-    lines.append("DCP_PROVIDER_ID=")
-with open(path, "w") as f:
-    f.write("\n".join(lines) + "\n")
-PY
 
 # Write hermes config
 python3 -c "
@@ -246,17 +216,29 @@ UNIT
   echo "Installed as systemd user service (auto-starts on boot)"
 fi
 
-# 10. Liveness beacon cron entry (hermes-liveness-spec.md).
-# Runs every minute; the script itself is idempotent and short-circuits if
-# DCP_PROVIDER_ID isn't set yet. We use a marker comment so re-runs of the
-# installer don't double-register.
-BEACON_SCRIPT="$AGENT_DIR/scripts/agent-liveness.sh"
-if [ -x "$BEACON_SCRIPT" ]; then
-  CRON_MARK="# DCP_AGENT_LIVENESS_BEACON"
-  CRON_LINE="* * * * * $BEACON_SCRIPT >> $DCP_DIR/agent-liveness.log 2>&1 $CRON_MARK"
-  (crontab -l 2>/dev/null | grep -v "$CRON_MARK"; echo "$CRON_LINE") | crontab - 2>/dev/null \
-    && echo "Installed agent-liveness cron (every 60s)" \
-    || echo "WARNING: could not install cron — run manually: crontab -e and add: $CRON_LINE"
+# 10. Provision DCP provider stack (skills + cron + daemon + liveness).
+# This is the same provisioning the heavyweight installer runs, exposed
+# here so `curl | bash` installs end up with the same final state.
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+INSTALL_DIR="$AGENT_DIR"
+export DCP_DIR HERMES_HOME INSTALL_DIR
+
+# Make sure DCP skills land in ~/.hermes/skills/dcp/ even though the
+# quick installer skips skills_sync.py.
+if [ -d "$AGENT_DIR/skills/dcp" ]; then
+  mkdir -p "$HERMES_HOME/skills/dcp"
+  cp -r "$AGENT_DIR/skills/dcp/." "$HERMES_HOME/skills/dcp/"
+  echo "DCP skills (19) synced to $HERMES_HOME/skills/dcp/"
+fi
+
+# Source the shared provisioner.
+if [ -f "$AGENT_DIR/scripts/install-cross-platform.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$AGENT_DIR/scripts/install-cross-platform.sh"
+  dcp_provision_full_stack || echo "WARN: provider stack provisioning hit errors (non-fatal)."
+else
+  echo "WARN: install-cross-platform.sh missing; cron + liveness not installed."
+  echo "      Re-run the installer after 'git pull' inside $AGENT_DIR."
 fi
 
 echo ""

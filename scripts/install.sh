@@ -1309,6 +1309,66 @@ SOUL_EOF
             log_success "Skills copied to ~/.hermes/skills/"
         fi
     fi
+
+    # Verify the 19 DCP skills landed. If not, force a recursive copy from
+    # the bundled skills/dcp/ tree (skills_sync.py uses rglob so this is
+    # belt-and-suspenders insurance, not a normal path).
+    local dcp_skills_src="$INSTALL_DIR/skills/dcp"
+    local dcp_skills_dst="$HERMES_HOME/skills/dcp"
+    if [ -d "$dcp_skills_src" ]; then
+        local need_copy=0
+        for s in always-on boot-sequence cron-orchestrator earnings \
+                 first-run-setup gpu-monitor heartbeat job-dispatch \
+                 log-manager model-auto-select network-diagnostics \
+                 ollama-manager power-management provider-chat \
+                 provider-registration security-hardening self-heal \
+                 self-update wireguard-health; do
+            if [ ! -f "$dcp_skills_dst/$s/SKILL.md" ]; then
+                need_copy=1
+                break
+            fi
+        done
+        if [ "$need_copy" -eq 1 ]; then
+            log_warn "Some DCP skills missing -- forcing recursive copy."
+            mkdir -p "$dcp_skills_dst"
+            cp -r "$dcp_skills_src/." "$dcp_skills_dst/"
+            log_success "DCP skills (19) verified at $dcp_skills_dst"
+        else
+            log_success "DCP skills (19) verified at $dcp_skills_dst"
+        fi
+    fi
+}
+
+# ============================================================================
+# DCP provider stack: cron jobs + dcp_daemon.py + liveness beacon
+# ============================================================================
+install_dcp_provider_stack() {
+    log_info "Installing DCP provider stack (cron + daemon + liveness)..."
+
+    # Skip on Termux -- no cron daemon, different lifecycle.
+    if [ "${DISTRO:-}" = "termux" ]; then
+        log_info "Skipping DCP cron provisioning on Termux (no system cron)."
+        return 0
+    fi
+
+    # Export the env vars the helper expects.
+    export HERMES_HOME
+    export DCP_DIR="${DCP_DIR:-$HOME/.dcp}"
+    export INSTALL_DIR
+
+    local helper="$INSTALL_DIR/scripts/install-cross-platform.sh"
+    if [ ! -f "$helper" ]; then
+        log_warn "install-cross-platform.sh not found at $helper -- skipping stack install."
+        log_warn "Run 'git pull' inside $INSTALL_DIR and re-invoke the installer."
+        return 0
+    fi
+
+    # shellcheck disable=SC1090
+    if . "$helper" && dcp_provision_full_stack; then
+        log_success "DCP provider stack ready."
+    else
+        log_warn "DCP provider stack provisioning hit errors; review log above."
+    fi
 }
 
 install_node_deps() {
@@ -1638,6 +1698,7 @@ main() {
     install_node_deps
     setup_path
     copy_config_templates
+    install_dcp_provider_stack
     run_setup_wizard
     maybe_start_gateway
 
