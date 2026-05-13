@@ -4,6 +4,9 @@
 
 # Hermes Agent ☤
 
+> 📍 **DCP fork.** Working on the DCP fork? Start with [`DCP-ONBOARDING.md`](DCP-ONBOARDING.md) — covers the DCP-specific deltas, env vars, and how to ship a build. The rest of this README is the upstream Nous Research docs.
+
+
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
