@@ -1,0 +1,35 @@
+name: Rebuild Onboarding HTML
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "DCP-ONBOARDING.md"
+      - "scripts/build-onboarding-html.py"
+      - ".github/workflows/onboarding-html.yml"
+  workflow_dispatch:
+
+jobs:
+  render-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install markdown
+      - name: Render branded HTML
+        run: python3 scripts/build-onboarding-html.py DCP-ONBOARDING.md DCP-ONBOARDING.html
+      - name: Upload to Nextcloud
+        env:
+          NEXTCLOUD_USER: ${{ secrets.NEXTCLOUD_USER }}
+          NEXTCLOUD_PASS: ${{ secrets.NEXTCLOUD_PASS }}
+        run: |
+          curl -sS -u "$NEXTCLOUD_USER:$NEXTCLOUD_PASS" -T DCP-ONBOARDING.html \
+            "https://files.dcp.sa/remote.php/dav/files/admin/DCP/10-Agent-Docs/DCP-Agent-Onboarding.html"
+      - name: Upload artifact (also accessible from GitHub Actions UI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: DCP-Agent-Onboarding-HTML
+          path: DCP-ONBOARDING.html
+          retention-days: 90
