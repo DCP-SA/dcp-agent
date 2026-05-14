@@ -4,9 +4,12 @@
 set -e
 
 PROVIDER_KEY=""
-MINIMAX_KEY="sk-cp-6Cm-ITGsSETwJ65ReXvtBWvl6DUnngu77j0ioIz3heBS43rxrw69g-4dpIldNcQl7Jn0W0Mt7_dONjS89k8VnFa1xTTPNPSxM57e8xaVjxQHN9kY60swqIQ"
 DCP_DIR="$HOME/.dcp"
 AGENT_DIR="$DCP_DIR/agent"
+# Master MiniMax key + NexusDatacenter bot token used to live here. They're
+# now server-side only — providers never receive master credentials.
+# Agent calls api.dcp.sa/api/agent/gateway with DCP_PROVIDER_KEY; the gateway
+# proxies to MiniMax server-side. (Audit 2026-05-14, see PR removing them.)
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -103,15 +106,22 @@ uv pip install -e '.[web]' 2>/dev/null || pip install -e '.[web]'
 echo "Configuring..."
 mkdir -p "$HOME/.hermes"
 
-# Write .env with restrictive perms (umask 077 before redirect so the file
-# is created mode 600 even on systems with a permissive default umask).
-# Without this, the file lands at 0644 and any other user on the host can
-# read the MiniMax key, Telegram bot token, and DCP provider key.
+# Note on auth (audit 2026-05-14, PR #15 + this PR):
+#   MINIMAX_API_KEY is the provider key the agent presents to the DCP
+#   gateway (api.dcp.sa/api/agent/gateway). The gateway authenticates by
+#   the provider key prefix and proxies to MiniMax with the server-side
+#   master key — providers never see the master. The master key used to
+#   be baked here (P0-1); it's gone now.
+#   TELEGRAM_BOT_TOKEN is no longer baked. Providers that want their own
+#   TG bot wire it via `hermes setup` after install.
+#
+# umask 077 ensures the file is created mode 600 even on systems with a
+# permissive default umask, before any secret hits disk.
 (
   umask 077
   cat > "$AGENT_DIR/.env" << EOF
-MINIMAX_API_KEY=$MINIMAX_KEY
-TELEGRAM_BOT_TOKEN=8397318012:AAEVIyEYiAM8rckObwHGjJKut6Q9nZv25f4
+MINIMAX_API_KEY=$PROVIDER_KEY
+MINIMAX_BASE_URL=https://api.dcp.sa/api/agent/gateway
 DCP_API_URL=https://api.dcp.sa
 DCP_PROVIDER_KEY=$PROVIDER_KEY
 EOF
