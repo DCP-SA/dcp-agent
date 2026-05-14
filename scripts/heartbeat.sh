@@ -16,8 +16,15 @@ mkdir -p "$DCP_DIR/logs" "$TASKS_DIR"
 GPU_MODEL="" GPU_TEMP=0 GPU_VRAM_USED=0 GPU_VRAM_TOTAL=0 GPU_UTIL=0
 
 if command -v nvidia-smi &>/dev/null; then
-  IFS=', ' read -r GPU_MODEL GPU_TEMP GPU_VRAM_USED GPU_VRAM_TOTAL GPU_UTIL <<< \
+  # IFS=',' (NOT ', ') — comma-only split. The previous ', ' (comma+space)
+  # split GPU_MODEL='NVIDIA GeForce RTX 3060 Ti' across 4 fields, leaving
+  # GPU_TEMP=GeForce (string, not number) and downstream Python parsing
+  # failed with NameError. Caught live on Tareq Node 2 2026-05-14.
+  IFS=',' read -r GPU_MODEL GPU_TEMP GPU_VRAM_USED GPU_VRAM_TOTAL GPU_UTIL <<< \
     "$(nvidia-smi --query-gpu=name,temperature.gpu,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)"
+  # Trim leading whitespace that comma-only split leaves on fields 2+.
+  GPU_MODEL="${GPU_MODEL# }"; GPU_TEMP="${GPU_TEMP# }"
+  GPU_VRAM_USED="${GPU_VRAM_USED# }"; GPU_VRAM_TOTAL="${GPU_VRAM_TOTAL# }"; GPU_UTIL="${GPU_UTIL# }"
 elif [[ "$(uname)" == "Darwin" ]]; then
   GPU_MODEL=$(system_profiler SPDisplaysDataType 2>/dev/null | grep "Chipset Model" | awk -F: '{print $2}' | xargs)
   GPU_VRAM_TOTAL=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}')
