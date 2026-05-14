@@ -154,6 +154,49 @@ dcp_install_daemon() {
 }
 
 # --------------------------------------------------------------------------
+# dcp_grant_wg_capability
+# Grant CAP_NET_ADMIN to /usr/bin/wg so the daemon can run `wg show wg0`
+# without root. Without this, the :19877 diag endpoint reports null for
+# listen_port, transfer_rx/tx, last_handshake_age, etc. — backend can't
+# observe real mesh health.
+#
+# Why setcap on the binary instead of granting the daemon capabilities?
+# Because the daemon runs under user-mode systemd (~/.config/systemd/user/)
+# and user-mode systemd cannot grant AmbientCapabilities — that's a
+# privilege of the root service manager. Granting cap_net_admin+ep on the
+# wg binary is the documented Linux pattern for read-only WG telemetry
+# from non-root callers, narrower than NOPASSWD sudo on `wg`.
+#
+# Linux only — macOS uses utun/Network Extension (no wg(8) binary).
+# Idempotent: getcap is checked first, setcap is a no-op if already set.
+# --------------------------------------------------------------------------
+dcp_grant_wg_capability() {
+    [ "$(uname)" = "Linux" ] || return 0
+    if ! command -v wg >/dev/null 2>&1; then
+        return 0  # no WG installed; nothing to do
+    fi
+    local wg_bin
+    wg_bin="$(command -v wg)"
+    if ! command -v setcap >/dev/null 2>&1; then
+        log_warn "setcap not available — WG diag fields will be null."
+        log_warn "Install libcap2-bin (apt) or libcap (yum) to fix."
+        return 0
+    fi
+    # Already granted?
+    if getcap "$wg_bin" 2>/dev/null | grep -q cap_net_admin; then
+        log_success "wg already has cap_net_admin (no-op)"
+        return 0
+    fi
+    if sudo -n setcap cap_net_admin+ep "$wg_bin" 2>/dev/null; then
+        log_success "Granted cap_net_admin to $wg_bin (WG diag fields now visible)"
+    else
+        log_warn "Could not setcap on $wg_bin (sudo password required)."
+        log_warn "Run manually after install: sudo setcap cap_net_admin+ep $wg_bin"
+        log_warn "Without this the daemon's :19877 diag returns null WG metrics."
+    fi
+}
+
+# --------------------------------------------------------------------------
 # dcp_install_cron_unix
 # Replace any prior DCP_CRON_BEGIN..DCP_CRON_END block in the user's crontab
 # with a fresh one. Idempotent: rerunning is safe and never duplicates.
@@ -249,11 +292,14 @@ dcp_install_launchd_macos() {
 # ~/.hermes/.env has been written.
 # --------------------------------------------------------------------------
 dcp_provision_full_stack() {
-    log_info "Provisioning DCP provider stack (cron + daemon + liveness)..."
+    log_info "Provisioning DCP provider stack (cron + daemon + liveness + hermes-cron)..."
 
     mkdir -p "$DCP_DIR" "$HERMES_HOME"
     dcp_install_scripts_dir
     dcp_install_daemon || true   # non-fatal; cron will skip the missing pieces
+    dcp_grant_wg_capability        # CAP_NET_ADMIN on /usr/bin/wg (Linux only)
+    dcp_install_hermes_scripts     # Copy + env-wrap scripts into ~/.hermes/scripts/
+    dcp_register_hermes_cron       # Register jobs with in-process orchestrator
 
     local os
     os="$(uname -s)"
@@ -262,14 +308,129 @@ dcp_provision_full_stack() {
             dcp_install_launchd_macos
             ;;
         Linux)
-            dcp_install_cron_unix
+            # OS-cron now carries only SURVIVAL watchdogs (must run even if
+            # Hermes itself dies). Everything else moved to hermes-cron above.
+            dcp_install_cron_unix_survival_only
             ;;
         *)
             log_warn "Unsupported OS for cron auto-install: $os"
             log_warn "Falling back to crontab (best effort)."
-            dcp_install_cron_unix || true
+            dcp_install_cron_unix_survival_only || true
             ;;
     esac
 
     log_success "DCP provider stack provisioned."
+}
+
+# --------------------------------------------------------------------------
+# dcp_install_hermes_scripts
+# Copy watchdog scripts into ~/.hermes/scripts/ (hermes cron requires real
+# files under this dir — symlinks are rejected as "path traversal"). Inject
+# an env-sourcing prologue so each script can read DCP_PROVIDER_KEY /
+# DCP_API_BASE without the caller having to set up env first.
+# --------------------------------------------------------------------------
+dcp_install_hermes_scripts() {
+    local src="$DCP_DIR/scripts"
+    local dest="$HERMES_HOME/scripts"
+    mkdir -p "$dest"
+    local scripts="heartbeat.sh gpu-check.sh ollama-watchdog.sh wireguard-watchdog.sh memory-check.sh earnings-update.sh self-update.sh disk-cleanup.sh security-audit.sh daily-report.sh"
+    local env_block='# ─── DCP env (auto-injected by orchestrator setup) ───
+set -a
+[ -f "$HOME/.dcp/agent/.env" ] && . "$HOME/.dcp/agent/.env"
+[ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
+set +a
+'
+    for f in $scripts; do
+        if [ -f "$src/$f" ]; then
+            cp -f "$src/$f" "$dest/$f"
+            chmod +x "$dest/$f"
+            # Idempotent env-wrap injection right after shebang
+            if ! grep -q "auto-injected by orchestrator" "$dest/$f"; then
+                awk -v block="$env_block" 'NR==1{print;print block;next}{print}' "$dest/$f" > "$dest/$f.tmp" && mv "$dest/$f.tmp" "$dest/$f"
+                chmod +x "$dest/$f"
+            fi
+        fi
+    done
+    log_success "Hermes scripts dir populated ($(ls "$dest" 2>/dev/null | wc -l | tr -d ' ') files)"
+}
+
+# --------------------------------------------------------------------------
+# dcp_register_hermes_cron
+# Register the DCP orchestration schedule with `hermes cron`. The in-process
+# scheduler runs each script on its cron schedule when the gateway is
+# running. --no-agent means the script IS the job (no LLM tokens burned).
+#
+# Why hermes-cron over OS crontab as primary:
+#   - Failure-tracking: hermes records each run's exit code and last_run ts
+#   - LLM escalation: a future iteration can switch select jobs from
+#     --no-agent to LLM-injected so the agent reacts to failures
+#   - Single source of truth: `hermes cron list` shows everything
+#   - Survives OS without crontab (e.g. minimal Alpine containers)
+#
+# OS-cron still carries the SURVIVAL watchdogs (ollama, wireguard, liveness)
+# so the provider can recover even if Hermes itself dies.
+# --------------------------------------------------------------------------
+dcp_register_hermes_cron() {
+    local hermes_bin="${HERMES_BIN:-$INSTALL_DIR/venv/bin/hermes}"
+    if [ ! -x "$hermes_bin" ]; then
+        hermes_bin="$(command -v hermes 2>/dev/null)"
+    fi
+    if [ -z "$hermes_bin" ] || [ ! -x "$hermes_bin" ]; then
+        log_warn "hermes binary not found — skipping hermes-cron registration."
+        log_warn "Re-run installer after Hermes Agent is installed."
+        return 0
+    fi
+    # Wipe any prior DCP jobs (idempotent on rerun)
+    "$hermes_bin" cron list 2>/dev/null | awk '
+        /^  [0-9a-f]+ \[/{cur=$1}
+        /Name:[[:space:]]+dcp-/{print cur}
+    ' | while read -r id; do
+        [ -n "$id" ] && "$hermes_bin" cron remove "$id" >/dev/null 2>&1
+    done
+    # Register the schedule. Per-minute jobs for live watchdogs; longer for
+    # maintenance. dcp_daemon.py handles its own heartbeat — hermes-heartbeat
+    # is the secondary path / fallback.
+    "$hermes_bin" cron create "* * * * *"      --name dcp-heartbeat          --script heartbeat.sh           --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "* * * * *"      --name dcp-gpu-thermal        --script gpu-check.sh           --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "*/2 * * * *"    --name dcp-ollama-watchdog    --script ollama-watchdog.sh     --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "*/2 * * * *"    --name dcp-wireguard-watchdog --script wireguard-watchdog.sh  --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "*/2 * * * *"    --name dcp-memory-check       --script memory-check.sh        --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "*/15 * * * *"   --name dcp-earnings-cache     --script earnings-update.sh     --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "0 */6 * * *"    --name dcp-self-update        --script self-update.sh         --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "0 */6 * * *"    --name dcp-disk-cleanup       --script disk-cleanup.sh        --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "0 1 * * *"      --name dcp-security-audit     --script security-audit.sh      --no-agent >/dev/null 2>&1 || true
+    "$hermes_bin" cron create "0 5 * * *"      --name dcp-daily-report       --script daily-report.sh        --no-agent >/dev/null 2>&1 || true
+    local count
+    count="$("$hermes_bin" cron list 2>/dev/null | grep -c '^  [0-9a-f]\{12\} \[active')"
+    log_success "Registered $count hermes-cron jobs (dcp-* prefix)"
+}
+
+# --------------------------------------------------------------------------
+# dcp_install_cron_unix_survival_only
+# Thinned OS crontab — only the watchdogs that must survive Hermes dying.
+# All other watchdogs are managed by hermes-cron (above). Marker-fenced
+# # DCP_CRON_BEGIN / # DCP_CRON_END so reruns replace cleanly.
+# --------------------------------------------------------------------------
+dcp_install_cron_unix_survival_only() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        log_warn "crontab unavailable — survival watchdogs not scheduled."
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp)"
+    # Strip prior block, keep everything else
+    (crontab -l 2>/dev/null || true) | awk '
+        BEGIN{in_block=0}
+        /^# DCP_CRON_BEGIN/{in_block=1; next}
+        /^# DCP_CRON_END/{in_block=0; next}
+        in_block==0{print}
+    ' > "$tmp"
+    cat >> "$tmp" <<EOF
+# DCP_CRON_BEGIN (survival watchdogs only — hermes-cron handles the rest)
+*/2 * * * * \$HOME/.hermes/scripts/ollama-watchdog.sh >> \$HOME/.dcp/logs/cron.log 2>&1
+*/2 * * * * \$HOME/.hermes/scripts/wireguard-watchdog.sh >> \$HOME/.dcp/logs/cron.log 2>&1
+# DCP_CRON_END
+EOF
+    crontab "$tmp" && log_success "OS crontab installed (2 survival watchdogs)"
+    rm -f "$tmp"
 }
