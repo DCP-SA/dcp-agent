@@ -56,12 +56,28 @@ Write-Host "Configuring..."
 $hermesDir = "$env:USERPROFILE\.hermes"
 New-Item -ItemType Directory -Path $hermesDir -Force | Out-Null
 
+$envPath = "$AGENT_DIR\.env"
 @"
 MINIMAX_API_KEY=$MINIMAX_KEY
 TELEGRAM_BOT_TOKEN=8397318012:AAEVIyEYiAM8rckObwHGjJKut6Q9nZv25f4
 DCP_API_URL=https://api.dcp.sa
 DCP_PROVIDER_KEY=$Key
-"@ | Set-Content "$AGENT_DIR\.env"
+"@ | Set-Content $envPath
+
+# Restrict .env ACL to the current user only — without this, other local
+# accounts (or low-priv malware running as another user) can read the
+# MiniMax key, Telegram bot token, and DCP provider key.
+try {
+    $acl = Get-Acl $envPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $me, "FullControl", "Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl $envPath $acl
+} catch {
+    Write-Warning "Could not harden ACL on $envPath — file may be readable by other local users."
+}
 
 # 7. Firewall rules
 Write-Host "Configuring firewall..."

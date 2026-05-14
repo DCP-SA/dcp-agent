@@ -103,12 +103,22 @@ uv pip install -e '.[web]' 2>/dev/null || pip install -e '.[web]'
 echo "Configuring..."
 mkdir -p "$HOME/.hermes"
 
-cat > "$AGENT_DIR/.env" << EOF
+# Write .env with restrictive perms (umask 077 before redirect so the file
+# is created mode 600 even on systems with a permissive default umask).
+# Without this, the file lands at 0644 and any other user on the host can
+# read the MiniMax key, Telegram bot token, and DCP provider key.
+(
+  umask 077
+  cat > "$AGENT_DIR/.env" << EOF
 MINIMAX_API_KEY=$MINIMAX_KEY
 TELEGRAM_BOT_TOKEN=8397318012:AAEVIyEYiAM8rckObwHGjJKut6Q9nZv25f4
 DCP_API_URL=https://api.dcp.sa
 DCP_PROVIDER_KEY=$PROVIDER_KEY
 EOF
+)
+# Defence-in-depth: explicit chmod in case the umask trick was bypassed
+# (e.g. file already existed at 0644 before the redirect).
+chmod 600 "$AGENT_DIR/.env"
 
 # Write hermes config
 python3 -c "
