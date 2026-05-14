@@ -7,9 +7,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$MINIMAX_KEY = "sk-cp-6Cm-ITGsSETwJ65ReXvtBWvl6DUnngu77j0ioIz3heBS43rxrw69g-4dpIldNcQl7Jn0W0Mt7_dONjS89k8VnFa1xTTPNPSxM57e8xaVjxQHN9kY60swqIQ"
 $DCP_DIR = "$env:LOCALAPPDATA\dcp-agent"
 $AGENT_DIR = "$DCP_DIR\agent"
+# Master MiniMax key + NexusDatacenter bot token used to live here. They're
+# now server-side only — providers never receive master credentials.
+# Agent calls api.dcp.sa/api/agent/gateway with DCP_PROVIDER_KEY; the gateway
+# proxies to MiniMax server-side. (Audit 2026-05-14.)
 
 Write-Host "=== DCP Agent Installer (Windows) ===" -ForegroundColor Cyan
 Write-Host "Provider key: $($Key.Substring(0,20))..."
@@ -56,17 +59,21 @@ Write-Host "Configuring..."
 $hermesDir = "$env:USERPROFILE\.hermes"
 New-Item -ItemType Directory -Path $hermesDir -Force | Out-Null
 
+# Provider key is presented to the DCP gateway; gateway proxies to MiniMax
+# server-side with the master key. The master key used to be baked here
+# (audit P0-1, 2026-05-14); it's gone now. TELEGRAM_BOT_TOKEN intentionally
+# absent — wire via `hermes setup` if needed.
 $envPath = "$AGENT_DIR\.env"
 @"
-MINIMAX_API_KEY=$MINIMAX_KEY
-TELEGRAM_BOT_TOKEN=8397318012:AAEVIyEYiAM8rckObwHGjJKut6Q9nZv25f4
+MINIMAX_API_KEY=$Key
+MINIMAX_BASE_URL=https://api.dcp.sa/api/agent/gateway
 DCP_API_URL=https://api.dcp.sa
 DCP_PROVIDER_KEY=$Key
 "@ | Set-Content $envPath
 
 # Restrict .env ACL to the current user only — without this, other local
 # accounts (or low-priv malware running as another user) can read the
-# MiniMax key, Telegram bot token, and DCP provider key.
+# provider key (audit P0-2).
 try {
     $acl = Get-Acl $envPath
     $acl.SetAccessRuleProtection($true, $false)
