@@ -89,7 +89,7 @@ if [ -d "$AGENT_DIR" ]; then
   cd "$AGENT_DIR" && git pull --ff-only 2>/dev/null || true
 else
   echo "Installing DCP Agent..."
-  git clone https://github.com/dhnpmp-tech/dcp-agent.git "$AGENT_DIR"
+  git clone https://github.com/DCP-SA/dcp-agent.git "$AGENT_DIR"
 fi
 cd "$AGENT_DIR"
 
