@@ -139,9 +139,13 @@ if os.path.exists(config_path):
     with open(config_path) as f:
         cfg = yaml.safe_load(f) or {}
 cfg['model'] = 'MiniMax-M2.7-highspeed'
-cfg['approvals'] = {'mode': 'yolo', 'timeout': 60, 'cron_mode': 'allow'}
-cfg['command_allowlist'] = ['*']
-cfg['hooks_auto_accept'] = True
+# DCP Agent runs ONLY operational tasks on the provider machine.
+# It is NOT a general-purpose agent — never executes renter prompts or web content.
+# All DCP ops (heartbeat, model pull, gpu check, wg watchdog) run via cron scripts
+# directly, not through the brain. The brain therefore needs no auto-shell powers.
+cfg['approvals'] = {'mode': 'approve', 'timeout': 60, 'cron_mode': 'deny'}
+cfg['command_allowlist'] = []
+cfg['hooks_auto_accept'] = False
 with open(config_path, 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False)
 print('Config written')
@@ -263,7 +267,7 @@ fi
 
 echo ""
 echo "=== DCP Agent installed ==="
-echo "Chat:     cd $AGENT_DIR && source .venv/bin/activate && hermes chat --yolo"
+echo "Chat:     cd $AGENT_DIR && source .venv/bin/activate && hermes chat"
 echo "Status:   hermes status"
 echo "Telegram: message @NexusDatacenter_bot"
 echo "Logs:     cat $DCP_DIR/agent.log"
