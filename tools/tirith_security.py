@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 _REPO = "sheeki03/tirith"
 
+# DCP pins tirith to a specific release rather than tracking `latest`.
+# Bumping this constant is the only way a new tirith binary lands on provider
+# machines — adversary can no longer ride the upstream `latest` channel.
+# Update via PR + reviewer manually re-checks the new release's signing chain.
+_PINNED_TAG = "v0.3.1"
+
 # Cosign provenance verification — pinned to the specific release workflow
 _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/release\\.yml@refs/tags/v"
 _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
@@ -296,7 +302,7 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         return None, "unsupported_platform"
 
     archive_name = f"tirith-{target}.tar.gz"
-    base_url = f"https://github.com/{_REPO}/releases/latest/download"
+    base_url = f"https://github.com/{_REPO}/releases/download/{_PINNED_TAG}"
 
     tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
     try:
