@@ -44,7 +44,7 @@ if (Test-Path "$AGENT_DIR\.git") {
     Push-Location $AGENT_DIR; git pull --ff-only 2>$null; Pop-Location
 } else {
     Write-Host "Installing DCP Agent..."
-    git clone https://github.com/dhnpmp-tech/dcp-agent.git $AGENT_DIR
+    git clone https://github.com/DCP-SA/dcp-agent.git $AGENT_DIR
 }
 Set-Location $AGENT_DIR
 
@@ -137,7 +137,7 @@ New-Item -ItemType File -Path "$DCP_DIR\agent-initialized" -Force | Out-Null
 # 12. Start now
 Write-Host ""
 Write-Host "=== DCP Agent installed ===" -ForegroundColor Green
-Write-Host "Chat:     cd $AGENT_DIR; .venv\Scripts\Activate.ps1; hermes chat --yolo"
+Write-Host "Chat:     cd $AGENT_DIR; .venv\Scripts\Activate.ps1; hermes chat"
 Write-Host "Status:   hermes status"
 Write-Host "Telegram: message @NexusDatacenter_bot"
 
