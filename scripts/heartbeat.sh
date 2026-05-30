@@ -88,8 +88,14 @@ PY
 [ -z "$TASK_UPDATES" ] && TASK_UPDATES='[]'
 
 # ── Send heartbeat. Backend requires api_key in body. Capture full
-#    response so we can read pending_tasks. ─────────────────────────────────
-RESPONSE=$(curl -sf -X POST https://api.dcp.sa/api/providers/heartbeat \
+#    response so we can read pending_tasks. Write the body to a temp file and
+#    capture the REAL HTTP status via -w '%{http_code}' so 4xx/5xx (auth
+#    failures, server errors) are detected as failures instead of being
+#    silently treated as 200. (We deliberately drop -f here: -f makes curl
+#    emit no body on HTTP errors, which would hide the status; we read the
+#    status code directly instead.) ─────────────────────────────────────────
+HB_BODY="/tmp/dcp_hb_body.json"
+HTTP_CODE=$(curl -s -o "$HB_BODY" -w '%{http_code}' -X POST https://api.dcp.sa/api/providers/heartbeat \
   -H "Authorization: Bearer $PROVIDER_KEY" \
   -H "Content-Type: application/json" \
   -d "{
@@ -108,18 +114,46 @@ RESPONSE=$(curl -sf -X POST https://api.dcp.sa/api/providers/heartbeat \
     \"accepting_jobs\": true,
     \"uptime_seconds\": $UPTIME_S,
     \"task_updates\": $TASK_UPDATES
-  }" 2>/dev/null || echo '{}')
+  }" 2>/dev/null || echo "000")
 
-HTTP_CODE=$([ -n "$RESPONSE" ] && echo "200" || echo "000")
+RESPONSE=$(cat "$HB_BODY" 2>/dev/null || echo '{}')
+# Only trust the body when the request actually succeeded; otherwise an error
+# page / partial body must not be parsed as a valid pending_tasks payload.
+if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+  RESPONSE='{}'
+fi
+[ -z "$RESPONSE" ] && RESPONSE='{}'
 
 # ── Spawn pull workers for newly-issued pull_model tasks ───────────────────
 # Each task gets a state file under ~/.dcp/tasks/<task_id>.json. If the file
 # already exists we don't re-fork (heartbeat is idempotent).
 export DCP_HEARTBEAT_RESPONSE="$RESPONSE"
 python3 - <<'PY' 2>/dev/null || true
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 tasks_dir = os.environ["DCP_TASKS_DIR"]
 os.makedirs(tasks_dir, exist_ok=True)
+
+# ── Untrusted-input validators ──────────────────────────────────────────────
+# task_id and pull_uri come straight from the backend response. We use them in
+# filesystem paths (f"{tid}.json", pull-{tid}.log) and as an argv to
+# `ollama pull`, so they must be validated before use.
+#   - task_id: strict slug, no path separators / traversal.
+#   - pull_uri: an Ollama model slug (namespace/name:tag). Reject anything that
+#     could redirect the pull at an attacker-controlled registry: no scheme
+#     (://), no leading '/', no '@' (digest/host pinning tricks).
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PULL_URI_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?(:[A-Za-z0-9_.-]+)?$")
+
+def is_valid_task_id(tid):
+    return isinstance(tid, str) and bool(TASK_ID_RE.match(tid))
+
+def is_valid_pull_uri(uri):
+    if not isinstance(uri, str) or not uri:
+        return False
+    if "://" in uri or uri.startswith("/") or "@" in uri:
+        return False
+    return bool(PULL_URI_RE.match(uri))
+
 try:
     resp = json.loads(os.environ.get("DCP_HEARTBEAT_RESPONSE", "{}"))
 except Exception:
@@ -129,12 +163,24 @@ for task in pending:
     if task.get("task_type") != "pull_model": continue
     tid = task.get("task_id")
     if not tid: continue
+    if not is_valid_task_id(tid):
+        # Reject before tid touches any filesystem path. Don't write a state
+        # file (its name would itself be the attacker-controlled value).
+        sys.stderr.write(f"[heartbeat] skipping task with invalid task_id: {tid!r}\n")
+        continue
     state_file = os.path.join(tasks_dir, f"{tid}.json")
     if os.path.exists(state_file):
         continue  # already started or completed
     params = task.get("params") or {}
     pull_uri = params.get("ollama_pull_uri")
     model_id = params.get("model_id")
+    if pull_uri and not is_valid_pull_uri(pull_uri):
+        with open(state_file, "w") as f:
+            json.dump({"task_id": tid, "status": "failed",
+                       "error_reason": "invalid ollama_pull_uri (failed allowlist)",
+                       "model_id": model_id}, f)
+        sys.stderr.write(f"[heartbeat] rejected invalid ollama_pull_uri for task {tid}: {pull_uri!r}\n")
+        continue
     if not pull_uri:
         with open(state_file, "w") as f:
             json.dump({"task_id": tid, "status": "failed", "error_reason": "missing ollama_pull_uri", "model_id": model_id}, f)
