@@ -138,11 +138,19 @@ os.makedirs(tasks_dir, exist_ok=True)
 # filesystem paths (f"{tid}.json", pull-{tid}.log) and as an argv to
 # `ollama pull`, so they must be validated before use.
 #   - task_id: strict slug, no path separators / traversal.
-#   - pull_uri: an Ollama model slug (namespace/name:tag). Reject anything that
-#     could redirect the pull at an attacker-controlled registry: no scheme
-#     (://), no leading '/', no '@' (digest/host pinning tricks).
+#   - pull_uri: an Ollama model ref. Allow bare hub slugs ("qwen3:8b",
+#     "library/qwen3:8b") AND refs that name a host from an EXPLICIT registry
+#     allowlist ("hf.co/<ns>/<model>[:tag]" — used by ALLaM, bge-m3, Falcon3).
+#     A regex alone can't tell "hf.co/x" (trusted) from "evil.com/x" (attacker),
+#     so registry-qualified refs must match the host allowlist. Also reject
+#     scheme (://), leading/trailing '/', '@' (digest/host pinning), '..' and
+#     whitespace/backslash. Ollama treats a first path-component containing a
+#     dot/colon (or 'localhost') as a registry host — we mirror that to decide
+#     when the allowlist applies.
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-PULL_URI_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?(:[A-Za-z0-9_.-]+)?$")
+ALLOWED_PULL_HOSTS = {"hf.co", "huggingface.co", "registry.ollama.ai", "ollama.com"}
+_PULL_SEG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")   # one path segment
+_PULL_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")  # optional :tag
 
 def is_valid_task_id(tid):
     return isinstance(tid, str) and bool(TASK_ID_RE.match(tid))
@@ -150,9 +158,27 @@ def is_valid_task_id(tid):
 def is_valid_pull_uri(uri):
     if not isinstance(uri, str) or not uri:
         return False
-    if "://" in uri or uri.startswith("/") or "@" in uri:
+    if ("://" in uri or uri.startswith("/") or uri.endswith("/")
+            or "@" in uri or ".." in uri or " " in uri or "\\" in uri):
         return False
-    return bool(PULL_URI_RE.match(uri))
+    parts = uri.split("/")
+    # Strip an optional :tag from the final segment.
+    if ":" in parts[-1]:
+        name, _, tag = parts[-1].rpartition(":")
+        if not name or not _PULL_TAG_RE.match(tag):
+            return False
+        parts[-1] = name
+    if not all(seg and _PULL_SEG_RE.match(seg) for seg in parts):
+        return False
+    first = parts[0]
+    looks_like_host = ("." in first) or (":" in first) or (first == "localhost")
+    if len(parts) > 1 and looks_like_host:
+        # Registry-qualified: host MUST be allowlisted (blocks evil.com/model).
+        return first in ALLOWED_PULL_HOSTS
+    if len(parts) > 2:
+        # Hub form (default registry) is at most <namespace>/<model>.
+        return False
+    return True
 
 try:
     resp = json.loads(os.environ.get("DCP_HEARTBEAT_RESPONSE", "{}"))
