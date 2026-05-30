@@ -196,6 +196,41 @@ exec hermes gateway start
 LAUNCHER
 chmod +x "$DCP_DIR/start-agent.sh"
 
+# 8.5 CRITICAL SAFETY PRE-FLIGHT — the DCP daemon must already be the runtime.
+#
+# Backlog gap #6, Phase 0 (decision A: daemon-everywhere). The agent no longer
+# installs its own heartbeat/WireGuard/model-pull/self-update loops — the DCP
+# daemon owns all of that. Before we register the agent's service (and its
+# always-on brain), confirm the daemon is installed and answering on its local
+# health endpoint (:19876). If it isn't, this box would have NO provider
+# runtime — so we FAIL LOUDLY here instead of silently shipping a dead node.
+#
+# Phase-1 follow-up: invoke the platform daemon installer directly from here
+#   (curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <TOKEN>)
+# as a prerequisite step so the operator never has to install it by hand. For
+# Phase 0 we hard-check it. Override (controlled envs only): DCP_SKIP_DAEMON_CHECK=1.
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+INSTALL_DIR="$AGENT_DIR"
+export DCP_DIR HERMES_HOME INSTALL_DIR
+
+if [ "${DCP_SKIP_DAEMON_CHECK:-0}" = "1" ]; then
+  echo "WARN: DCP_SKIP_DAEMON_CHECK=1 — skipping the daemon pre-flight. This box may"
+  echo "      have NO provider runtime if the DCP daemon is not actually installed."
+elif [ -f "$AGENT_DIR/scripts/install-cross-platform.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$AGENT_DIR/scripts/install-cross-platform.sh"
+  if ! dcp_require_daemon_running; then
+    echo ""
+    echo "ERROR: aborting agent install — the DCP daemon is the required runtime."
+    echo "       Install the daemon first, then re-run this installer."
+    exit 1
+  fi
+else
+  echo "WARN: install-cross-platform.sh missing; cannot verify the DCP daemon is running."
+  echo "      Re-run after 'git pull' inside $AGENT_DIR, or install the daemon manually:"
+  echo "        curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <YOUR_TOKEN>"
+fi
+
 # 9. Install as background service
 if [[ "$(uname)" == "Darwin" ]]; then
   # macOS launchd
@@ -240,12 +275,12 @@ UNIT
   echo "Installed as systemd user service (auto-starts on boot)"
 fi
 
-# 10. Provision DCP provider stack (skills + cron + daemon + liveness).
-# This is the same provisioning the heavyweight installer runs, exposed
-# here so `curl | bash` installs end up with the same final state.
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-INSTALL_DIR="$AGENT_DIR"
-export DCP_DIR HERMES_HOME INSTALL_DIR
+# 10. Provision the DCP agent-as-brain stack (skills + diagnostic/maintenance
+# cron only). Under decision A the agent does NOT register heartbeat/WG/pull/
+# self-update — those are the daemon's. The provisioner re-runs the daemon
+# pre-flight (idempotent with step 8.5) and refreshes the local reference
+# scripts + dcp_daemon.py copy.
+# (HERMES_HOME / INSTALL_DIR / DCP_DIR exported above in step 8.5.)
 
 # Make sure DCP skills land in ~/.hermes/skills/dcp/ even though the
 # quick installer skips skills_sync.py.
@@ -255,13 +290,15 @@ if [ -d "$AGENT_DIR/skills/dcp" ]; then
   echo "DCP skills (19) synced to $HERMES_HOME/skills/dcp/"
 fi
 
-# Source the shared provisioner.
-if [ -f "$AGENT_DIR/scripts/install-cross-platform.sh" ]; then
+# The shared provisioner was already sourced in step 8.5; call the entry point.
+if command -v dcp_provision_full_stack >/dev/null 2>&1; then
+  dcp_provision_full_stack || echo "WARN: provider stack provisioning hit errors (non-fatal)."
+elif [ -f "$AGENT_DIR/scripts/install-cross-platform.sh" ]; then
   # shellcheck disable=SC1091
   . "$AGENT_DIR/scripts/install-cross-platform.sh"
   dcp_provision_full_stack || echo "WARN: provider stack provisioning hit errors (non-fatal)."
 else
-  echo "WARN: install-cross-platform.sh missing; cron + liveness not installed."
+  echo "WARN: install-cross-platform.sh missing; diagnostic cron not installed."
   echo "      Re-run the installer after 'git pull' inside $AGENT_DIR."
 fi
 
