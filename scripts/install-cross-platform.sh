@@ -47,6 +47,88 @@ fi
 DCP_INSTALLER_BASE="${DCP_INSTALLER_BASE:-https://api.dcp.sa/installers}"
 DCP_DAEMON_URL="${DCP_DAEMON_URL:-$DCP_INSTALLER_BASE/dcp_daemon.py}"
 
+# --------------------------------------------------------------------------
+# Runtime consolidation — backlog gap #6, Phase 0 (decision A: daemon-everywhere)
+# --------------------------------------------------------------------------
+# The DCP *daemon* (dcp_daemon.py, served by the platform) is the SOLE runtime
+# on every provider box: it owns heartbeat, WireGuard, model-pull, engine
+# watchdog, and self-update. The Hermes agent sits ON TOP as an optional,
+# read-mostly brain — it must NOT run its own copies of those loops.
+#
+# Before Phase 0, this provisioner ALSO registered the agent's duplicate
+# runtime scripts (heartbeat.sh, wireguard-watchdog.sh, ollama-watchdog.sh,
+# self-update.sh, agent-liveness.sh) as hermes-cron jobs AND OS cron entries.
+# That produced TWO heartbeats overwriting the same provider row every ~30s
+# and 3 WireGuard self-healers fighting each other — the recurring Node-2
+# split-brain.
+#
+# DCP_RUNTIME_SCRIPTS lists the scripts the daemon now owns. They are NEVER
+# registered as services/cron by the agent installer. The files are still
+# copied to disk for reference / diagnosis / later phases — only their
+# SCHEDULED REGISTRATION is removed.
+#
+# Probe port for the daemon's local health endpoint (decision A pre-flight).
+DCP_DAEMON_HEALTH_PORT="${DCP_DAEMON_HEALTH_PORT:-19876}"
+DCP_RUNTIME_SCRIPTS="heartbeat.sh gpu-check.sh ollama-watchdog.sh wireguard-watchdog.sh self-update.sh agent-liveness.sh"
+
+# --------------------------------------------------------------------------
+# dcp_require_daemon_running  (CRITICAL SAFETY CONSTRAINT)
+# Under decision A the daemon MUST be present — the agent no longer provides
+# a runtime, so a box with no daemon would have NO heartbeat / WG / pull /
+# self-update at all. This pre-flight probes the daemon's local health
+# endpoint (:19876) and FAILS LOUDLY with install instructions if absent.
+#
+# Phase-1 follow-up: wire the platform daemon installer
+#   (curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <TOKEN>)
+# directly into this installer as a prerequisite step, so providers never
+# have to install the daemon by hand. For Phase 0 we only HARD-CHECK it.
+#
+# Returns 0 if the daemon answers on :19876, non-zero otherwise.
+# --------------------------------------------------------------------------
+dcp_require_daemon_running() {
+    local port="$DCP_DAEMON_HEALTH_PORT"
+    local ok=1
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time 3 "http://127.0.0.1:${port}/health" >/dev/null 2>&1 \
+           || curl -fsS --max-time 3 "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+            ok=0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q -T 3 -O /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null \
+           || wget -q -T 3 -O /dev/null "http://127.0.0.1:${port}/" 2>/dev/null; then
+            ok=0
+        fi
+    else
+        log_warn "Neither curl nor wget available — cannot verify the DCP daemon is running."
+        log_warn "Proceeding WITHOUT a daemon health check. Install/verify the daemon manually:"
+        log_warn "    curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <YOUR_TOKEN>"
+        return 0
+    fi
+
+    if [ "$ok" -eq 0 ]; then
+        log_success "DCP daemon is running (health endpoint :${port} reachable)."
+        return 0
+    fi
+
+    log_error "DCP daemon NOT detected on http://127.0.0.1:${port}."
+    log_error ""
+    log_error "Decision A (daemon-everywhere): the DCP daemon is the SOLE runtime on"
+    log_error "every provider box. It owns heartbeat, WireGuard, model-pull, engine"
+    log_error "watchdog and self-update. The Hermes agent is an optional brain ON TOP"
+    log_error "and no longer ships its own runtime — so this box currently has NO"
+    log_error "provider runtime at all."
+    log_error ""
+    log_error "Install the DCP daemon FIRST, then re-run this agent installer:"
+    log_error ""
+    log_error "    curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <YOUR_TOKEN>"
+    log_error ""
+    log_error "Get your provider token from https://dcp.sa/setup."
+    log_error "To override this check in a controlled environment, set"
+    log_error "DCP_SKIP_DAEMON_CHECK=1 (NOT recommended on a real provider box)."
+    return 1
+}
+
 # Marker fences used in crontab so reruns replace, never duplicate.
 DCP_CRON_BEGIN="# DCP_CRON_BEGIN -- managed by dcp-agent install"
 DCP_CRON_END="# DCP_CRON_END"
@@ -201,8 +283,12 @@ dcp_grant_wg_capability() {
 # Replace any prior DCP_CRON_BEGIN..DCP_CRON_END block in the user's crontab
 # with a fresh one. Idempotent: rerunning is safe and never duplicates.
 #
-# SKIPS heartbeat.sh and gpu-check.sh -- those are owned by dcp_daemon.py
-# (see PR #396 :19877 wg_diag_server).
+# Phase 0 (decision A): SKIPS every RUNTIME script the daemon owns —
+# heartbeat.sh, gpu-check.sh, ollama-watchdog.sh, wireguard-watchdog.sh,
+# self-update.sh and agent-liveness.sh (see DCP_RUNTIME_SCRIPTS). Only the
+# diagnostic / maintenance jobs remain. This is the macOS fallback path
+# (called from dcp_install_launchd_macos when no launchd plists ship); the
+# survival-only Linux path is dcp_install_cron_unix_survival_only.
 # --------------------------------------------------------------------------
 dcp_install_cron_unix() {
     if ! command -v crontab >/dev/null 2>&1; then
@@ -218,21 +304,21 @@ dcp_install_cron_unix() {
     # DCP_PROVIDER_KEY / DCP_API_BASE / DCP_PROVIDER_ID available.
     local prelude="set -a; [ -f $env_src ] && . $env_src; set +a;"
 
+    # NOTE: the daemon-owned runtime watchdogs (ollama, wireguard,
+    # self-update, agent-liveness, heartbeat, gpu) are deliberately ABSENT.
+    # Registering them here re-creates the double-heartbeat / duelling-WG
+    # split-brain. Maintenance/diagnostic jobs only.
     local new_block
     new_block=$(cat <<CRONBLOCK
 $DCP_CRON_BEGIN
 # Do not edit between these markers; install.sh rewrites this block.
-*/2  * * * * $prelude bash $scripts/ollama-watchdog.sh    >> $DCP_DIR/cron.log 2>&1
-*/2  * * * * $prelude bash $scripts/wireguard-watchdog.sh >> $DCP_DIR/cron.log 2>&1
+# Runtime watchdogs (heartbeat/WG/ollama/self-update/liveness) are owned by
+# the DCP daemon under decision A and are intentionally NOT scheduled here.
 0    * * * * $prelude bash $scripts/memory-check.sh       >> $DCP_DIR/cron.log 2>&1
 0    * * * * $prelude bash $scripts/disk-cleanup.sh       >> $DCP_DIR/cron.log 2>&1
 0 */6  * * * $prelude bash $scripts/earnings-update.sh    >> $DCP_DIR/cron.log 2>&1
 0 */6  * * * $prelude bash $scripts/security-audit.sh     >> $DCP_DIR/cron.log 2>&1
 0 3    * * * $prelude bash $scripts/daily-report.sh       >> $DCP_DIR/cron.log 2>&1
-0 4    * * * $prelude bash $scripts/self-update.sh        >> $DCP_DIR/cron.log 2>&1
-$DCP_LIVENESS_BEGIN
-*    * * * * $prelude bash $scripts/agent-liveness.sh     >> $DCP_DIR/liveness.log 2>&1
-$DCP_LIVENESS_END
 $DCP_CRON_END
 CRONBLOCK
 )
@@ -292,14 +378,32 @@ dcp_install_launchd_macos() {
 # ~/.hermes/.env has been written.
 # --------------------------------------------------------------------------
 dcp_provision_full_stack() {
-    log_info "Provisioning DCP provider stack (cron + daemon + liveness + hermes-cron)..."
+    log_info "Provisioning DCP provider stack (decision A: daemon is the sole runtime)..."
 
     mkdir -p "$DCP_DIR" "$HERMES_HOME"
+
+    # CRITICAL SAFETY CONSTRAINT (decision A): never leave a box with no
+    # runtime. The agent no longer ships heartbeat/WG/pull/self-update, so
+    # the daemon MUST already be installed and answering on :19876 before we
+    # provision the agent-as-brain on top. Fail LOUDLY if it isn't.
+    #
+    # Override (controlled environments only): DCP_SKIP_DAEMON_CHECK=1.
+    if [ "${DCP_SKIP_DAEMON_CHECK:-0}" = "1" ]; then
+        log_warn "DCP_SKIP_DAEMON_CHECK=1 — skipping the daemon pre-flight. The box may"
+        log_warn "have NO provider runtime if the DCP daemon is not actually installed."
+    elif ! dcp_require_daemon_running; then
+        log_error "Aborting agent provisioning: the DCP daemon is the required runtime."
+        return 1
+    fi
+
     dcp_install_scripts_dir
-    dcp_install_daemon || true   # non-fatal; cron will skip the missing pieces
-    dcp_grant_wg_capability        # CAP_NET_ADMIN on /usr/bin/wg (Linux only)
-    dcp_install_hermes_scripts     # Copy + env-wrap scripts into ~/.hermes/scripts/
-    dcp_register_hermes_cron       # Register jobs with in-process orchestrator
+    # Keep refreshing the local dcp_daemon.py copy/template for reference and
+    # for the platform daemon to consume; it is NOT the agent's runtime, the
+    # platform-installed daemon is. Non-fatal.
+    dcp_install_daemon || true
+    dcp_grant_wg_capability        # CAP_NET_ADMIN on /usr/bin/wg (Linux only); read-only WG diag
+    dcp_install_hermes_scripts     # Copy scripts into ~/.hermes/scripts/ for reference/diagnosis
+    dcp_register_hermes_cron       # Register ONLY diagnostic/maintenance jobs (no runtime loops)
 
     local os
     os="$(uname -s)"
@@ -328,6 +432,12 @@ dcp_provision_full_stack() {
 # files under this dir — symlinks are rejected as "path traversal"). Inject
 # an env-sourcing prologue so each script can read DCP_PROVIDER_KEY /
 # DCP_API_BASE without the caller having to set up env first.
+#
+# Phase 0 note: the daemon-owned RUNTIME scripts (heartbeat/gpu/ollama/
+# wireguard/self-update/agent-liveness) are still copied here for reference
+# and ad-hoc diagnosis, but they are NO LONGER registered as cron jobs (see
+# dcp_register_hermes_cron / dcp_install_cron_unix*). Files on disk, never
+# scheduled by the agent.
 # --------------------------------------------------------------------------
 dcp_install_hermes_scripts() {
     local src="$DCP_DIR/scripts"
@@ -367,8 +477,12 @@ set +a
 #   - Single source of truth: `hermes cron list` shows everything
 #   - Survives OS without crontab (e.g. minimal Alpine containers)
 #
-# OS-cron still carries the SURVIVAL watchdogs (ollama, wireguard, liveness)
-# so the provider can recover even if Hermes itself dies.
+# Phase 0 (decision A): the RUNTIME jobs the daemon owns — heartbeat,
+# gpu-thermal, ollama-watchdog, wireguard-watchdog, self-update — are NO
+# LONGER registered here. Registering them was the source of the double
+# heartbeat + duelling WG self-healers (the Node-2 split-brain). Only
+# diagnostic / maintenance jobs that do NOT duplicate the daemon remain:
+# memory-check, earnings-cache, disk-cleanup, security-audit, daily-report.
 # --------------------------------------------------------------------------
 dcp_register_hermes_cron() {
     local hermes_bin="${HERMES_BIN:-$INSTALL_DIR/venv/bin/hermes}"
@@ -387,16 +501,13 @@ dcp_register_hermes_cron() {
     ' | while read -r id; do
         [ -n "$id" ] && "$hermes_bin" cron remove "$id" >/dev/null 2>&1
     done
-    # Register the schedule. Per-minute jobs for live watchdogs; longer for
-    # maintenance. dcp_daemon.py handles its own heartbeat — hermes-heartbeat
-    # is the secondary path / fallback.
-    "$hermes_bin" cron create "* * * * *"      --name dcp-heartbeat          --script heartbeat.sh           --no-agent >/dev/null 2>&1 || true
-    "$hermes_bin" cron create "* * * * *"      --name dcp-gpu-thermal        --script gpu-check.sh           --no-agent >/dev/null 2>&1 || true
-    "$hermes_bin" cron create "*/2 * * * *"    --name dcp-ollama-watchdog    --script ollama-watchdog.sh     --no-agent >/dev/null 2>&1 || true
-    "$hermes_bin" cron create "*/2 * * * *"    --name dcp-wireguard-watchdog --script wireguard-watchdog.sh  --no-agent >/dev/null 2>&1 || true
+    # Register ONLY the diagnostic / maintenance jobs. The RUNTIME jobs the
+    # daemon owns (heartbeat, gpu-thermal, ollama-watchdog, wireguard-watchdog,
+    # self-update) are intentionally NOT registered under decision A — the
+    # daemon is the sole runtime. See DCP_RUNTIME_SCRIPTS above. Re-adding any
+    # of them here re-creates the split-brain.
     "$hermes_bin" cron create "*/2 * * * *"    --name dcp-memory-check       --script memory-check.sh        --no-agent >/dev/null 2>&1 || true
     "$hermes_bin" cron create "*/15 * * * *"   --name dcp-earnings-cache     --script earnings-update.sh     --no-agent >/dev/null 2>&1 || true
-    "$hermes_bin" cron create "0 */6 * * *"    --name dcp-self-update        --script self-update.sh         --no-agent >/dev/null 2>&1 || true
     "$hermes_bin" cron create "0 */6 * * *"    --name dcp-disk-cleanup       --script disk-cleanup.sh        --no-agent >/dev/null 2>&1 || true
     "$hermes_bin" cron create "0 1 * * *"      --name dcp-security-audit     --script security-audit.sh      --no-agent >/dev/null 2>&1 || true
     "$hermes_bin" cron create "0 5 * * *"      --name dcp-daily-report       --script daily-report.sh        --no-agent >/dev/null 2>&1 || true
@@ -407,30 +518,35 @@ dcp_register_hermes_cron() {
 
 # --------------------------------------------------------------------------
 # dcp_install_cron_unix_survival_only
-# Thinned OS crontab — only the watchdogs that must survive Hermes dying.
-# All other watchdogs are managed by hermes-cron (above). Marker-fenced
-# # DCP_CRON_BEGIN / # DCP_CRON_END so reruns replace cleanly.
+# Phase 0 (decision A): the DCP daemon is the SOLE provider runtime and the
+# survival layer. The agent no longer installs ANY OS-cron survival
+# watchdogs — previously this registered ollama-watchdog.sh and
+# wireguard-watchdog.sh, which fought the daemon's own WG/engine healers
+# (the Node-2 split-brain).
+#
+# This function is now PURELY a cleanup pass: it strips any prior
+# DCP_CRON_BEGIN..DCP_CRON_END block the agent installed on earlier
+# versions, and registers nothing. Idempotent — safe to rerun, and safe on
+# an upgrade-in-place (it removes the duplicate watchdogs left behind).
 # --------------------------------------------------------------------------
 dcp_install_cron_unix_survival_only() {
     if ! command -v crontab >/dev/null 2>&1; then
-        log_warn "crontab unavailable — survival watchdogs not scheduled."
+        log_info "crontab unavailable — nothing to clean up (daemon is the runtime)."
         return 0
     fi
-    local tmp
-    tmp="$(mktemp)"
-    # Strip prior block, keep everything else
-    (crontab -l 2>/dev/null || true) | awk '
+    local current stripped
+    current="$(crontab -l 2>/dev/null || true)"
+    # Strip any prior agent-managed survival block, keep everything else.
+    stripped="$(printf '%s\n' "$current" | awk '
         BEGIN{in_block=0}
         /^# DCP_CRON_BEGIN/{in_block=1; next}
         /^# DCP_CRON_END/{in_block=0; next}
         in_block==0{print}
-    ' > "$tmp"
-    cat >> "$tmp" <<EOF
-# DCP_CRON_BEGIN (survival watchdogs only — hermes-cron handles the rest)
-*/2 * * * * \$HOME/.hermes/scripts/ollama-watchdog.sh >> \$HOME/.dcp/logs/cron.log 2>&1
-*/2 * * * * \$HOME/.hermes/scripts/wireguard-watchdog.sh >> \$HOME/.dcp/logs/cron.log 2>&1
-# DCP_CRON_END
-EOF
-    crontab "$tmp" && log_success "OS crontab installed (2 survival watchdogs)"
-    rm -f "$tmp"
+    ')"
+    if [ "$stripped" != "$current" ]; then
+        printf '%s\n' "$stripped" | crontab -
+        log_success "Removed legacy agent OS-cron survival watchdogs (daemon owns survival now)."
+    else
+        log_info "No legacy agent OS-cron watchdogs present (daemon is the sole runtime)."
+    fi
 }

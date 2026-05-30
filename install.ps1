@@ -102,6 +102,29 @@ Set-Location $AGENT_DIR
 hermes gateway start
 "@ | Set-Content "$DCP_DIR\start-agent.ps1"
 
+# 9.5 CRITICAL SAFETY PRE-FLIGHT — the DCP daemon must already be the runtime.
+# Backlog gap #6, Phase 0 (decision A: daemon-everywhere). The agent no longer
+# installs heartbeat/WG/model-pull/self-update — the DCP daemon owns those.
+# Confirm the daemon is installed and answering on :19876 BEFORE we register
+# the agent's service/brain. If it isn't, this box would have NO provider
+# runtime, so fail loudly. Phase-1 follow-up: invoke the platform daemon
+# installer from here. Override (controlled envs only): DCP_SKIP_DAEMON_CHECK=1.
+$HermesHome = "$env:USERPROFILE\.hermes"
+$helper = "$AGENT_DIR\scripts\install-cross-platform.ps1"
+if ($env:DCP_SKIP_DAEMON_CHECK -eq "1") {
+    Write-Warning "DCP_SKIP_DAEMON_CHECK=1 — skipping the daemon pre-flight. This box may have NO provider runtime if the DCP daemon is not actually installed."
+} elseif (Test-Path $helper) {
+    . $helper
+    if (-not (Test-DcpDaemonRunning)) {
+        Write-Host ""
+        Write-Host "ERROR: aborting agent install — the DCP daemon is the required runtime (decision A)." -ForegroundColor Red
+        Write-Host "       Install the daemon first, then re-run this installer." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Warning "install-cross-platform.ps1 missing; cannot verify the DCP daemon is running. Install the daemon manually before relying on this node."
+}
+
 # 10. Install as scheduled task (runs at startup as current user)
 $action = New-ScheduledTaskAction -Execute "powershell" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DCP_DIR\start-agent.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtLogon
@@ -109,17 +132,17 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "DCP Agent" -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Write-Host "Installed as Windows scheduled task (auto-starts on login)"
 
-# 10b. Provision DCP provider stack (skills + scheduled tasks + daemon + liveness).
-# Mirrors install.sh on Unix; gives curl|iex users the same final state as
-# the heavyweight installer.
-$HermesHome = "$env:USERPROFILE\.hermes"
+# 10b. Provision DCP agent-as-brain stack (skills + diagnostic/maintenance
+# scheduled tasks only). Under decision A no runtime watchdogs are registered;
+# the daemon owns heartbeat/WG/pull/self-update. (HermesHome/helper set above.)
 if (Test-Path "$AGENT_DIR\skills\dcp") {
     $dcpDst = "$HermesHome\skills\dcp"
     New-Item -ItemType Directory -Path $dcpDst -Force | Out-Null
     Copy-Item -Path "$AGENT_DIR\skills\dcp\*" -Destination $dcpDst -Recurse -Force
     Write-Host "DCP skills (19) synced to $dcpDst"
 }
-$helper = "$AGENT_DIR\scripts\install-cross-platform.ps1"
+# $helper was set + dot-sourced in step 9.5 (the daemon pre-flight). It runs
+# its own daemon check inside Install-DcpProviderStack (idempotent).
 if (Test-Path $helper) {
     try {
         . $helper
@@ -128,7 +151,7 @@ if (Test-Path $helper) {
         Write-Host "WARN: provider stack provisioning hit errors: $_" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "WARN: install-cross-platform.ps1 missing; tasks + liveness not installed." -ForegroundColor Yellow
+    Write-Host "WARN: install-cross-platform.ps1 missing; diagnostic tasks not installed." -ForegroundColor Yellow
 }
 
 # 11. Mark initialized

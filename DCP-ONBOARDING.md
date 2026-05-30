@@ -14,11 +14,36 @@ This is a fork of [Nous Research's Hermes Agent](https://github.com/NousResearch
 | LLM brain routed through `api.dcp.sa/api/agent/gateway` (DCP gateway pattern — upstream keys stay on VPS, never on provider nodes) | `~/.hermes/.env`, set by install script |
 | Auto-orchestration on first run when `install_token` is present | `hermes_cli/gateway.py` — commit `daf22f53` |
 | Heartbeat executes `pull_model` tasks from backend response | commit `faf4cf9f` |
-| 19 DCP-specific skills + 10 cron scripts + SOUL.md persona | commits `8480a5fe`, `217e83fb` |
+| 19 DCP-specific skills + diagnostic/maintenance cron scripts + SOUL.md persona | commits `8480a5fe`, `217e83fb` (runtime watchdogs moved to the daemon — see "Runtime topology" below) |
 | Installer scripts (`scripts/install.sh`, `scripts/install-agent.sh`) hook into `api.dcp.sa/install/agent` and `https://api.dcp.sa/installers/dcp-agent.tar.gz` | `scripts/` |
 | Pull-tasks loop (separate provider work surface) | `feat/agent-pull-tasks-v2` branch — in flight |
 
 If you're touching code that's pure upstream Hermes, prefer to send the change to `NousResearch/hermes-agent` first, then merge upstream here.
+
+---
+
+## Runtime topology (decision A: daemon-everywhere) — READ THIS FIRST
+
+A provider box runs **two** distinct things, with a strict division of labour:
+
+| Layer | What it is | What it owns |
+|---|---|---|
+| **DCP daemon** (`dcp_daemon.py`, served by the platform) | The **runtime**. Installed first, runs as a system service. | Heartbeat, WireGuard, model-pull, engine watchdog, self-update. Exposes a local health endpoint on **`:19876`** (and a WG diag side-server on `:19877`). |
+| **Hermes agent** (this repo) | An **optional brain on top**. Read-mostly diagnosis + provider chat. | Reads the daemon's `:19876` health + backend state. Runs DCP skills and a few **diagnostic/maintenance** jobs (memory-check, disk-cleanup, earnings cache, security-audit, daily-report). |
+
+**The agent does NOT run its own heartbeat, WireGuard watchdog, model-pull loop, engine watchdog, or self-update.** The daemon owns all of those. This is the fix for the recurring **Node-2 split-brain**: before Phase 0 the agent installer *also* registered `heartbeat.sh`, `wireguard-watchdog.sh`, `ollama-watchdog.sh`, `self-update.sh`, and `agent-liveness.sh` as cron/services, so two heartbeats overwrote the same provider row every ~30s and three WireGuard self-healers fought each other.
+
+**Install order is mandatory: daemon first, then agent.** The agent installer hard-checks that the daemon is answering on `:19876` and **refuses to install** if it isn't (you'd otherwise be left with a box that has no runtime at all). The script files for the daemon-owned watchdogs still ship in `scripts/` for reference and ad-hoc diagnosis — they're just never registered as the runtime.
+
+```bash
+# 1. Install the DCP daemon (the runtime) — do this FIRST.
+curl -fsSL https://dcp.sa/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
+
+# 2. Then install the Hermes agent (the brain) on top.
+curl -fsSL https://api.dcp.sa/install/agent | bash -s -- --key <YOUR_PROVIDER_KEY>
+```
+
+> Status: this is **Phase 0** of the runtime consolidation (backlog gap #6). Phase 0 stops the agent from registering the duplicate runtime scripts and adds the daemon pre-flight. **Phase 1+** repositions the agent further: wire the daemon-install directly into the agent installer (so step 1 happens automatically), have the agent *read* daemon state rather than re-derive it, give it a scoped non-provider key, and route control actions as requests to the daemon/control-API.
 
 ---
 
@@ -149,7 +174,9 @@ Long-term we'll automate this with a GitHub Action on tag push; for now it's man
 | What | Where |
 |---|---|
 | DCP-specific skills | `hermes_cli/skills/dcp/` (and individual skills throughout `optional-skills/` tagged with `domain:dcp`) |
-| Cron scripts | `scripts/` — `daily-report.sh`, `gpu-check.sh`, `heartbeat.sh`, `disk-cleanup.sh`, `earnings-update.sh`, etc. |
+| Cron scripts (diagnostic/maintenance only — these are what the agent still schedules) | `scripts/` — `memory-check.sh`, `disk-cleanup.sh`, `earnings-update.sh`, `security-audit.sh`, `daily-report.sh` |
+| Daemon-owned scripts (present in `scripts/` for reference, but **NOT** registered by the agent installer — the daemon runs these) | `heartbeat.sh`, `wireguard-watchdog.sh`, `ollama-watchdog.sh`, `self-update.sh`, `agent-liveness.sh`, `gpu-check.sh` |
+| Install topology + daemon pre-flight | `install.sh`, `install.ps1`, `scripts/install-cross-platform.{sh,ps1}` — see "Runtime topology" above |
 | SOUL.md (persona) | `hermes_cli/default_soul.py` writes the default; provider's working copy lives at `~/.hermes/SOUL.md` |
 | Installer scripts | `scripts/install-agent.sh` (one-line installer hosted at `api.dcp.sa/install/agent`) |
 | Provider gateway hook | `hermes_cli/gateway.py` — first-run orchestration when `install_token` exists |
