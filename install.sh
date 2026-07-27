@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://dcp.sa/agent-install.sh | bash -s -- --key YOUR_PROVIDER_KEY
 set -e
 
-PROVIDER_KEY=""
+PROVIDER_KEY="${DCP_PROVIDER_KEY:-}"
 DCP_DIR="$HOME/.dcp"
 AGENT_DIR="$DCP_DIR/agent"
 # Master MiniMax key + NexusDatacenter bot token used to live here. They're
@@ -21,12 +21,13 @@ done
 
 if [ -z "$PROVIDER_KEY" ]; then
   echo "Usage: ./install.sh --key YOUR_DCP_PROVIDER_KEY"
+  echo "   or: DCP_PROVIDER_KEY=YOUR_DCP_PROVIDER_KEY ./install.sh"
   echo "Get your key from https://dcp.sa/setup"
   exit 1
 fi
 
 echo "=== DCP Agent Installer ==="
-echo "Provider key: ${PROVIDER_KEY:0:20}..."
+echo "Provider key: received (not shown)"
 
 # 0. Pre-flight: verify sudo credentials are cached.
 #
@@ -55,7 +56,8 @@ if ! sudo -n true 2>/dev/null; then
   echo "Fix: cache your sudo credentials first, then re-run the installer:"
   echo ""
   echo "    sudo -v"
-  echo "    curl -fsSL https://api.dcp.sa/install/agent | bash -s -- --key $PROVIDER_KEY"
+  echo "    export DCP_PROVIDER_KEY=YOUR_DCP_PROVIDER_KEY"
+  echo "    curl -fsSL https://api.dcp.sa/install/agent | bash"
   echo ""
   exit 1
 fi
