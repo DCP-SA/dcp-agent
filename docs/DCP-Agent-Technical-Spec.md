@@ -80,8 +80,10 @@ curl -fsSL https://dcp.sa/agent-install.sh | bash -s -- --key YOUR_PROVIDER_KEY
 3. Installs `uv` (fast Python package manager)
 4. Clones `dcp-agent` repo into `~/.dcp/agent/`
 5. Creates Python venv, installs dependencies
-6. Writes `.env` (MiniMax API key, Telegram bot token, DCP provider key)
-7. Writes `~/.hermes/config.yaml` (model, yolo mode, command allowlist)
+6. Writes `.env` with the DCP provider key for gateway auth. Master MiniMax
+   and Telegram bot tokens stay server-side.
+7. Writes `~/.hermes/config.yaml` with approve-mode operational defaults and
+   no shell command allowlist.
 8. **One-time sudo setup**: Creates `/etc/sudoers.d/dcp-agent` for passwordless WireGuard, GPU, and network commands
 9. Creates launcher script at `~/.dcp/start-agent.sh`
 10. **macOS**: Installs launchd service (`sa.dcp.agent.plist`) with RunAtLoad + KeepAlive
@@ -314,7 +316,7 @@ Failure detected
 
 ### Key Protection
 - `.env` and `wg0.conf` stored with `chmod 600`
-- Provider key never logged in full — masked to first 20 chars
+- Provider key is never echoed in installer output or rerun help
 - Daily audit scans logs for leaked keys, auto-redacts if found
 
 ### Exposure Check

@@ -3173,7 +3173,7 @@ def _run_dcp_first_run_orchestration_if_needed() -> None:
             # still mark success based on exit code so we don't loop forever.
             try:
                 os.makedirs(dcp_dir, exist_ok=True)
-                with open(init_marker, "w") as f:
+                with open(init_marker, "w", encoding="utf-8") as f:
                     f.write("orchestrated_by=run_gateway\n")
             except Exception:
                 pass
